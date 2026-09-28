@@ -1,8 +1,8 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
-import { useRouter } from "next/navigation";
 
 export function LogoutButton() {
   const router = useRouter();
@@ -11,7 +11,12 @@ export function LogoutButton() {
     const supabase = createClient();
     await supabase.auth.signOut();
     router.push("/auth/login");
+    router.refresh(); // clears cached pages so Back doesn't show the profile
   };
 
-  return <Button onClick={logout}>Logout</Button>;
+  return (
+      <Button variant="outline" onClick={logout}>
+        Logout
+      </Button>
+  );
 }
