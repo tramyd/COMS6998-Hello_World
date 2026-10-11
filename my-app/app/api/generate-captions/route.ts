@@ -9,7 +9,7 @@ const ALLOWED_IMAGE_TYPES = new Set([
   "image/gif",
 ]);
 const CAPTION_PROMPT =
-  "Describe this photo in one clear sentence, focusing on the subjects, action, and mood.";
+  "Write a witty, fun, and short meme caption for this photo, focusing on the subjects, action, and mood.";
 
 type GeminiResponse = {
   candidates?: Array<{
@@ -43,12 +43,14 @@ function isGeminiQuotaError(error: unknown) {
 
 function isRetryableGeminiError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error ?? "");
-  return !isGeminiQuotaError(error) &&
+  return (
+    !isGeminiQuotaError(error) &&
     (message.includes("503") ||
       message.includes("UNAVAILABLE") ||
       message.includes("429") ||
       message.includes("RATE_LIMIT") ||
-      message.includes("RESOURCE_EXHAUSTED"));
+      message.includes("RESOURCE_EXHAUSTED"))
+  );
 }
 
 function delay(milliseconds: number) {
@@ -194,9 +196,9 @@ export async function POST(request: Request) {
         ? "Caption generation is not configured. Set GEMINI_API_KEY in the server environment."
         : isGeminiQuotaError(error)
           ? "Gemini API quota is exhausted for this model. Wait for the quota to reset or enable a plan with additional quota."
-        : isRetryableGeminiError(error)
-          ? "The caption service is temporarily busy. Please wait a moment and try again."
-          : "Caption generation failed. Please try again.";
+          : isRetryableGeminiError(error)
+            ? "The caption service is temporarily busy. Please wait a moment and try again."
+            : "Caption generation failed. Please try again.";
     return NextResponse.json(
       { error: message },
       {
