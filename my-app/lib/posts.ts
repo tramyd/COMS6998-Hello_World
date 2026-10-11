@@ -28,15 +28,64 @@ export type PostWithProfile = Post & {
   profiles: Profile | null;
 };
 
+export type PostFeedFilters = {
+  age: "all" | "24h" | "week" | "month";
+  vote: "all" | "liked" | "disliked";
+  sort: "newest" | "most-liked";
+  userId?: string | null;
+};
+
 export async function getPosts(
   supabase: SupabaseClient,
   from: number,
   to: number,
+  filters?: PostFeedFilters,
 ) {
-  const { data: posts, error: postsError } = await supabase
+  const ageInMilliseconds = {
+    "24h": 24 * 60 * 60 * 1000,
+    week: 7 * 24 * 60 * 60 * 1000,
+    month: 30 * 24 * 60 * 60 * 1000,
+  } as const;
+  const cutoff =
+    filters?.age && filters.age !== "all"
+      ? new Date(Date.now() - ageInMilliseconds[filters.age]).toISOString()
+      : null;
+
+  let query = supabase
     .from("posts")
-    .select("id, created_at, post_owner, image_url, caption, likes, dislikes")
-    .order("created_at", { ascending: false })
+    .select("id, created_at, post_owner, image_url, caption, likes, dislikes");
+
+  if (cutoff) query = query.gte("created_at", cutoff);
+
+  if (filters?.sort === "most-liked") {
+    query = query
+      .order("likes", { ascending: false })
+      .order("dislikes", { ascending: true })
+      .order("created_at", { ascending: false });
+  } else {
+    query = query.order("created_at", { ascending: false });
+  }
+
+  if (filters?.vote && filters.vote !== "all") {
+    if (!filters.userId) return { data: [] as PostWithProfile[], error: null };
+
+    const { data: votedPosts, error: votesError } = await supabase
+      .from("post_votes")
+      .select("post_id")
+      .eq("user_id", filters.userId)
+      .eq("vote", filters.vote === "liked" ? 1 : -1);
+
+    if (votesError) return { data: null, error: votesError };
+
+    const votedPostIds = (votedPosts ?? []).map(({ post_id }) => post_id);
+    if (votedPostIds.length === 0) {
+      return { data: [] as PostWithProfile[], error: null };
+    }
+
+    query = query.in("id", votedPostIds);
+  }
+
+  const { data: posts, error: postsError } = await query
     .range(from, to)
     .returns<Post[]>();
 

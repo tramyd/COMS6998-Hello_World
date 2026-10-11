@@ -13,7 +13,7 @@ import {
   savePostVote,
   uploadPostImage,
 } from "@/lib/posts";
-import type { PostWithProfile, PostVote } from "@/lib/posts";
+import type { PostFeedFilters, PostWithProfile, PostVote } from "@/lib/posts";
 import { createClient } from "@/lib/supabase/client";
 
 const PAGE_SIZE = 12;
@@ -71,9 +71,17 @@ export function HomeFeed({
   const [supabase] = useState(() => createClient());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const captionRequestIdRef = useRef(0);
+  const feedRequestIdRef = useRef(0);
   const [posts, setPosts] = useState(initialPosts);
+  const [feedFilters, setFeedFilters] = useState<PostFeedFilters>({
+    age: "all",
+    vote: "all",
+    sort: "newest",
+  });
   const [votes, setVotes] = useState<Record<string, 1 | -1>>(() =>
-    Object.fromEntries(initialVotes.map(({ post_id, vote }) => [post_id, vote])),
+    Object.fromEntries(
+      initialVotes.map(({ post_id, vote }) => [post_id, vote]),
+    ),
   );
   const [hasMore, setHasMore] = useState(initialHasMore);
   const [feedError, setFeedError] = useState(loadError);
@@ -87,6 +95,7 @@ export function HomeFeed({
   const [busyPostIds, setBusyPostIds] = useState<Set<string>>(new Set());
   const [voteError, setVoteError] = useState<string | null>(initialVoteError);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [isLoadingFeed, setIsLoadingFeed] = useState(false);
 
   useEffect(
     () => () => {
@@ -101,15 +110,21 @@ export function HomeFeed({
     return () => window.clearTimeout(timeout);
   }, [postingMessage]);
 
-  const refreshFeed = async () => {
+  const refreshFeed = async (filters = feedFilters) => {
+    const requestId = ++feedRequestIdRef.current;
+    setIsLoadingFeed(true);
+    setIsLoadingMore(false);
     const { data: refreshedPosts, error } = await getPosts(
       supabase,
       0,
       PAGE_SIZE - 1,
+      { ...filters, userId: initialUserId },
     );
+    if (requestId !== feedRequestIdRef.current) return;
     if (error) {
       console.error("Failed to refresh posts:", error);
       setFeedError("Could not refresh the posts. Please try again.");
+      setIsLoadingFeed(false);
       return;
     }
 
@@ -124,17 +139,31 @@ export function HomeFeed({
         initialUserId,
         safePosts.map((post) => post.id),
       );
+      if (requestId !== feedRequestIdRef.current) return;
       if (votesError) {
         console.error("Failed to refresh post votes:", votesError);
         setVoteError("Could not load your votes. Please refresh the page.");
-        return;
+      } else {
+        setVoteError(null);
+        setVotes(
+          Object.fromEntries(
+            (refreshedVotes ?? []).map(({ post_id, vote }) => [post_id, vote]),
+          ),
+        );
       }
-      setVotes(
-        Object.fromEntries(
-          (refreshedVotes ?? []).map(({ post_id, vote }) => [post_id, vote]),
-        ),
-      );
     }
+    setIsLoadingFeed(false);
+  };
+
+  const updateFeedFilters = (filters: Partial<PostFeedFilters>) => {
+    const nextFilters = { ...feedFilters, ...filters };
+    setFeedFilters(nextFilters);
+    setPosts([]);
+    setVotes({});
+    setHasMore(false);
+    setFeedError(null);
+    setVoteError(null);
+    void refreshFeed(nextFilters);
   };
 
   const validateImage = (file: File) => {
@@ -244,7 +273,8 @@ export function HomeFeed({
         data: { user },
         error: authError,
       } = await supabase.auth.getUser();
-      if (authError) throw new Error("Could not verify your session. Sign in again.");
+      if (authError)
+        throw new Error("Could not verify your session. Sign in again.");
       if (!user) {
         router.push("/auth/login");
         throw new Error("Please sign in to publish a post.");
@@ -256,7 +286,8 @@ export function HomeFeed({
         path,
         selectedFile,
       );
-      if (uploadError) throw new Error(`Image upload failed: ${uploadError.message}`);
+      if (uploadError)
+        throw new Error(`Image upload failed: ${uploadError.message}`);
 
       try {
         const { data: insertedPost, error: insertError } = await createPost(
@@ -328,9 +359,7 @@ export function HomeFeed({
         return {
           ...post,
           likes:
-            post.likes -
-            (oldVote === 1 ? 1 : 0) +
-            (nextVote === 1 ? 1 : 0),
+            post.likes - (oldVote === 1 ? 1 : 0) + (nextVote === 1 ? 1 : 0),
           dislikes:
             post.dislikes -
             (oldVote === -1 ? 1 : 0) +
@@ -424,7 +453,8 @@ export function HomeFeed({
   };
 
   const handleLoadMore = async () => {
-    if (isLoadingMore) return;
+    if (isLoadingMore || isLoadingFeed) return;
+    const requestId = ++feedRequestIdRef.current;
     setIsLoadingMore(true);
     setFeedError(null);
     try {
@@ -432,6 +462,7 @@ export function HomeFeed({
         supabase,
         posts.length,
         posts.length + PAGE_SIZE - 1,
+        { ...feedFilters, userId: initialUserId },
       );
       if (error) throw error;
 
@@ -443,6 +474,7 @@ export function HomeFeed({
           newPosts.map((post) => post.id),
         );
         if (newVotesError) throw newVotesError;
+        if (requestId !== feedRequestIdRef.current) return;
         setVotes((current) => ({
           ...current,
           ...Object.fromEntries(
@@ -450,13 +482,15 @@ export function HomeFeed({
           ),
         }));
       }
+      if (requestId !== feedRequestIdRef.current) return;
       setPosts((current) => [...current, ...newPosts]);
       setHasMore(newPosts.length === PAGE_SIZE);
     } catch (error) {
+      if (requestId !== feedRequestIdRef.current) return;
       console.error("Failed to load more posts:", error);
       setFeedError("Could not load more posts. Please try again.");
     } finally {
-      setIsLoadingMore(false);
+      if (requestId === feedRequestIdRef.current) setIsLoadingMore(false);
     }
   };
 
@@ -465,7 +499,7 @@ export function HomeFeed({
       <div className="mx-auto max-w-7xl px-6 py-6">
         <header className="mb-8 flex items-center justify-between">
           <Link href="/home" className="text-xl font-semibold">
-            AI Caption Generator
+            AI Meme Caption Generator
           </Link>
           {initialUserId ? (
             <Link
@@ -504,69 +538,69 @@ export function HomeFeed({
               >
                 Choose image
               </button>
+            ) : caption ? (
+              <div className="flex w-full flex-col items-center gap-4 text-center">
+                {previewUrl && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={previewUrl}
+                    alt="Post preview"
+                    className="max-h-96 w-full max-w-lg rounded-xl object-contain"
+                  />
+                )}
+                <p className="w-full max-w-lg text-center leading-relaxed">
+                  {caption}
+                </p>
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={handleCancelPost}
+                    disabled={isPosting}
+                    className="rounded-full border border-border bg-background px-6 py-3 text-sm font-semibold shadow-sm transition hover:bg-accent disabled:opacity-60"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCreatePost}
+                    disabled={isPosting}
+                    className="rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-sm transition hover:opacity-90 disabled:opacity-60"
+                  >
+                    {isPosting ? "Posting..." : "Post"}
+                  </button>
+                </div>
+              </div>
             ) : (
-              caption ? (
-                <div className="flex w-full flex-col items-center gap-4 text-center">
-                  {previewUrl && (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={previewUrl}
-                      alt="Post preview"
-                      className="max-h-96 w-full max-w-lg rounded-xl object-contain"
-                    />
-                  )}
-                  <p className="w-full max-w-lg text-center leading-relaxed">
-                    {caption}
-                  </p>
-                  <div className="flex gap-3">
-                    <button
-                      type="button"
-                      onClick={handleCancelPost}
-                      disabled={isPosting}
-                      className="rounded-full border border-border bg-background px-6 py-3 text-sm font-semibold shadow-sm transition hover:bg-accent disabled:opacity-60"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleCreatePost}
-                      disabled={isPosting}
-                      className="rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-sm transition hover:opacity-90 disabled:opacity-60"
-                    >
-                      {isPosting ? "Posting..." : "Post"}
-                    </button>
-                  </div>
+              <div className="flex w-full flex-col items-start gap-4">
+                {previewUrl && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={previewUrl}
+                    alt="Post preview"
+                    className="max-h-96 w-full max-w-lg rounded-xl object-contain"
+                  />
+                )}
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={handleCancelPost}
+                    disabled={isPosting || isGenerating}
+                    className="rounded-full border border-border bg-background px-6 py-3 text-sm font-semibold shadow-sm transition hover:bg-accent disabled:opacity-60"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleGenerateCaption}
+                    disabled={isGenerating || isPosting}
+                    className="rounded-full border border-border bg-background px-6 py-3 text-sm font-semibold shadow-sm transition hover:bg-accent disabled:opacity-60"
+                  >
+                    {isGenerating
+                      ? "Generating caption..."
+                      : "Generate caption"}
+                  </button>
                 </div>
-              ) : (
-                <div className="flex w-full flex-col items-start gap-4">
-                  {previewUrl && (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={previewUrl}
-                      alt="Post preview"
-                      className="max-h-96 w-full max-w-lg rounded-xl object-contain"
-                    />
-                  )}
-                  <div className="flex gap-3">
-                    <button
-                      type="button"
-                      onClick={handleCancelPost}
-                      disabled={isPosting || isGenerating}
-                      className="rounded-full border border-border bg-background px-6 py-3 text-sm font-semibold shadow-sm transition hover:bg-accent disabled:opacity-60"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleGenerateCaption}
-                      disabled={isGenerating || isPosting}
-                      className="rounded-full border border-border bg-background px-6 py-3 text-sm font-semibold shadow-sm transition hover:bg-accent disabled:opacity-60"
-                    >
-                      {isGenerating ? "Generating caption..." : "Generate caption"}
-                    </button>
-                  </div>
-                </div>
-              )
+              </div>
             )}
             {formError && (
               <p className="mt-3 text-sm text-red-600" role="alert">
@@ -581,30 +615,98 @@ export function HomeFeed({
           </section>
         ) : (
           <p className="mb-10 rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
-            <Link className="font-semibold text-foreground underline" href="/auth/login">
+            <Link
+              className="font-semibold text-foreground underline"
+              href="/auth/login"
+            >
               Log in
             </Link>{" "}
             to create posts and vote.
           </p>
         )}
 
+        <div className="mb-5 flex flex-wrap items-end gap-4 rounded-2xl border border-border bg-card p-4">
+          <label className="grid gap-1 text-sm font-medium">
+            Post age
+            <select
+              value={feedFilters.age}
+              onChange={(event) =>
+                updateFeedFilters({
+                  age: event.target.value as PostFeedFilters["age"],
+                })
+              }
+              className="rounded-lg border border-border bg-background px-3 py-2 font-normal"
+            >
+              <option value="all">Any time</option>
+              <option value="24h">Last 24 hours</option>
+              <option value="week">Last week</option>
+              <option value="month">Last month</option>
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm font-medium">
+            Your vote
+            <select
+              value={feedFilters.vote}
+              disabled={!initialUserId}
+              onChange={(event) =>
+                updateFeedFilters({
+                  vote: event.target.value as PostFeedFilters["vote"],
+                })
+              }
+              className="rounded-lg border border-border bg-background px-3 py-2 font-normal disabled:opacity-60"
+            >
+              <option value="all">All posts</option>
+              <option value="liked">Posts I liked</option>
+              <option value="disliked">Posts I disliked</option>
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm font-medium">
+            Sort by
+            <select
+              value={feedFilters.sort}
+              onChange={(event) =>
+                updateFeedFilters({
+                  sort: event.target.value as PostFeedFilters["sort"],
+                })
+              }
+              className="rounded-lg border border-border bg-background px-3 py-2 font-normal"
+            >
+              <option value="newest">Newest</option>
+              <option value="most-liked">Most liked to disliked</option>
+            </select>
+          </label>
+          {!initialUserId && (
+            <p className="text-sm text-muted-foreground">
+              Log in to filter by your votes.
+            </p>
+          )}
+        </div>
+
         <section
           aria-label="Posts feed"
           className="grid grid-cols-1 items-start gap-5 sm:grid-cols-2 lg:grid-cols-3"
         >
           {feedError && (
-            <p className="col-span-full rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-700" role="alert">
+            <p
+              className="col-span-full rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-700"
+              role="alert"
+            >
               {feedError}
             </p>
           )}
           {voteError && (
-            <p className="col-span-full rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-700" role="alert">
+            <p
+              className="col-span-full rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-700"
+              role="alert"
+            >
               {voteError}
             </p>
           )}
           {posts.length === 0 && !feedError && (
             <p className="col-span-full rounded-xl border border-border p-6 text-center text-muted-foreground">
-              No posts yet. Be the first to share one.
+              {isLoadingFeed
+                ? "Loading posts..."
+                : "No posts match these filters."}
             </p>
           )}
 
