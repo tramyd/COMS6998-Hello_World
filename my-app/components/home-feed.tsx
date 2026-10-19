@@ -38,6 +38,8 @@ type HomeFeedProps = {
   initialHasMore: boolean;
   loadError: string | null;
   initialVoteError: string | null;
+  initialIsSuperadmin: boolean;
+  adminPanelUrl: string;
 };
 
 function getOwnerName(post: PostWithProfile) {
@@ -66,6 +68,8 @@ export function HomeFeed({
   initialHasMore,
   loadError,
   initialVoteError,
+  initialIsSuperadmin,
+  adminPanelUrl,
 }: HomeFeedProps) {
   const router = useRouter();
   const [supabase] = useState(() => createClient());
@@ -502,12 +506,24 @@ export function HomeFeed({
             AI Meme Caption Generator
           </Link>
           {initialUserId ? (
-            <Link
-              href="/profile"
-              className="rounded-full border border-border bg-card px-4 py-2 text-sm font-medium shadow-sm transition hover:bg-accent"
-            >
-              Profile
-            </Link>
+            <div className="flex items-center gap-2">
+              {initialIsSuperadmin ? (
+                <a
+                  href={adminPanelUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-full border border-border bg-card px-4 py-2 text-sm font-medium shadow-sm transition hover:bg-accent"
+                >
+                  Admin panel
+                </a>
+              ) : null}
+              <Link
+                href="/profile"
+                className="rounded-full border border-border bg-card px-4 py-2 text-sm font-medium shadow-sm transition hover:bg-accent"
+              >
+                Profile
+              </Link>
+            </div>
           ) : (
             <Link
               href="/auth/login"

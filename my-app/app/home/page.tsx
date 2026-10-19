@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getPostVotes, getPosts } from "@/lib/posts";
 import type { PostVote } from "@/lib/posts";
 import { HomeFeed } from "@/components/home-feed";
+import { checkSuperadmin, getAdminPanelUrl } from "@/lib/superadmin";
 
 const PAGE_SIZE = 12;
 
@@ -23,7 +24,16 @@ async function HomePageContent() {
   }
 
   let votes: PostVote[] = [];
+  let initialIsSuperadmin = false;
   let voteErrorMessage: string | null = null;
+  if (user) {
+    const access = await checkSuperadmin(supabase, user.id);
+    if (access.error) {
+      console.error("Failed to verify superadmin access:", access.error);
+    } else {
+      initialIsSuperadmin = access.isSuperadmin;
+    }
+  }
   if (user && posts && !postsError) {
     const { data, error } = await getPostVotes(
       supabase,
@@ -50,6 +60,8 @@ async function HomePageContent() {
         postsError ? "Could not load posts. Please refresh the page." : null
       }
       initialVoteError={voteErrorMessage}
+      initialIsSuperadmin={initialIsSuperadmin}
+      adminPanelUrl={getAdminPanelUrl()}
     />
   );
 }

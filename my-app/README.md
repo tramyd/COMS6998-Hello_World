@@ -78,6 +78,7 @@ If you wish to just develop locally and not deploy to Vercel, [follow the steps 
   ```env
   NEXT_PUBLIC_SUPABASE_URL=[INSERT SUPABASE PROJECT URL]
   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=[INSERT SUPABASE PROJECT API PUBLISHABLE OR ANON KEY]
+  ADMIN_PANEL_URL=http://localhost:3001
   ```
   > [!NOTE]
   > This example uses `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, which refers to Supabase's new **publishable** key format.
@@ -93,6 +94,8 @@ If you wish to just develop locally and not deploy to Vercel, [follow the steps 
    ```
 
    The starter kit should now be running on [localhost:3000](http://localhost:3000/).
+
+   Apply the SQL files in `../supabase/migrations` to the Supabase project in timestamp order. The profile migration copies the required profile email from `auth.users`, creates/backfills profile rows, and installs the self-access policies needed for name and avatar updates. Then add the intended Google user's Supabase Auth user ID to `public.superadmins` (see the Admin Panel README). The Admin Panel button is shown only when the signed-in user's ID is present in that RLS-protected table. Locally, `ADMIN_PANEL_URL` defaults to `http://localhost:3001`; on Vercel, it defaults to `https://coms-6998-admin-panel.vercel.app`. Set `ADMIN_PANEL_URL` to override the destination (for example, when using a custom domain).
 
 6. This template comes with the default shadcn/ui style initialized. If you instead want other ui.shadcn styles, delete `components.json` and [re-install shadcn/ui](https://ui.shadcn.com/docs/installation/next)
 
