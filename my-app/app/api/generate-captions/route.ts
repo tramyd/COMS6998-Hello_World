@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+const MAX_GEMINI_ATTEMPTS = 2;
+const CAPTION_IMPROVEMENT_TIMEOUT_MS = 120_000;
+const PROMPT_LOG_TIMEOUT_MS = 3_000;
 const ALLOWED_IMAGE_TYPES = new Set([
   "image/jpeg",
   "image/png",
@@ -9,7 +14,28 @@ const ALLOWED_IMAGE_TYPES = new Set([
   "image/gif",
 ]);
 const CAPTION_PROMPT =
-  "Write a witty, fun, and short meme caption for this photo, focusing on the subjects, action, and mood.";
+  "Write exactly one short, witty meme caption for this photo, focusing on the subjects, action, and mood. Return only the caption as plain text. Use standard punctuation only where it reads naturally. Do not add quotation marks, decorative or repeated punctuation, labels, markdown, or alternative captions.";
+const IMPROVE_CAPTION_PROMPT =
+  "Improve the draft meme caption that follows. Make it concise, witty, and natural while preserving its meaning and factual details. Return exactly one improved caption as plain text. Do not add explanations, quotation marks, labels, markdown, or decorative or repeated punctuation.";
+
+class CaptionGenerationTimeoutError extends Error {}
+
+class GeminiApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly providerStatus: string | undefined,
+    message: string,
+  ) {
+    super(message);
+    this.name = "GeminiApiError";
+  }
+}
+
+type GeminiPart =
+  | { text: string }
+  | { inline_data: { mime_type: string; data: string } };
+
+type GeminiContents = Array<{ parts: GeminiPart[] }>;
 
 type GeminiResponse = {
   candidates?: Array<{
@@ -28,11 +54,17 @@ function parseGeminiText(payload: GeminiResponse): string {
           "",
       )
       .join("\n")
-      .trim() ?? ""
+      ?? ""
   );
 }
 
 function isGeminiQuotaError(error: unknown) {
+  if (
+    error instanceof GeminiApiError &&
+    (error.status === 429 || error.providerStatus === "RESOURCE_EXHAUSTED")
+  ) {
+    return true;
+  }
   const message = error instanceof Error ? error.message : String(error ?? "");
   return (
     message.includes("Quota exceeded") ||
@@ -42,6 +74,9 @@ function isGeminiQuotaError(error: unknown) {
 }
 
 function isRetryableGeminiError(error: unknown) {
+  if (error instanceof GeminiApiError) {
+    return error.status === 429 || error.status >= 500;
+  }
   const message = error instanceof Error ? error.message : String(error ?? "");
   return (
     !isGeminiQuotaError(error) &&
@@ -57,15 +92,49 @@ function delay(milliseconds: number) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function logPromptChainStep(
+  supabase: SupabaseClient,
+  step: {
+    chainId: string;
+    userId: string;
+    stage: "draft" | "improve";
+    model: string;
+    prompt: string;
+    response: string;
+    imageMimeType: string;
+  },
+) {
+  try {
+    const { error } = await supabase
+      .from("prompt_chain_steps")
+      .insert({
+        chain_id: step.chainId,
+        user_id: step.userId,
+        stage: step.stage,
+        model: step.model,
+        prompt: step.prompt,
+        response: step.response,
+        image_mime_type: step.imageMimeType,
+      })
+      .abortSignal(AbortSignal.timeout(PROMPT_LOG_TIMEOUT_MS));
+    if (error) {
+      console.error("Failed to save prompt chain step:", error);
+    }
+  } catch (error) {
+    console.error("Failed to save prompt chain step:", error);
+  }
+}
+
 async function callGeminiWithModel(
-  imageBase64: string,
-  mimeType: string,
+  contents: GeminiContents,
   model: string,
+  options: { signal?: AbortSignal; maxAttempts?: number } = {},
 ) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is not configured.");
 
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  const maxAttempts = options.maxAttempts ?? MAX_GEMINI_ATTEMPTS;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       const response = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
@@ -73,29 +142,35 @@ async function callGeminiWithModel(
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  { text: CAPTION_PROMPT },
-                  {
-                    inline_data: {
-                      mime_type: mimeType,
-                      data: imageBase64,
-                    },
-                  },
-                ],
-              },
-            ],
-            generationConfig: { temperature: 0.8 },
+            contents,
+            generationConfig: { temperature: 0.3 },
           }),
+          signal: options.signal,
         },
       );
 
       if (!response.ok) {
-        const error = new Error(
-          `Gemini request failed: ${await response.text()}`,
+        const responseBody = await response.text();
+        let providerMessage = responseBody;
+        let providerStatus: string | undefined;
+        try {
+          const payload = JSON.parse(responseBody) as {
+            error?: { message?: string; status?: string };
+          };
+          providerMessage = payload.error?.message || responseBody;
+          providerStatus = payload.error?.status;
+        } catch {
+          // Keep the response text for diagnostic logging when it is not JSON.
+        }
+        const error = new GeminiApiError(
+          response.status,
+          providerStatus,
+          `Gemini request failed (${response.status}${providerStatus ? ` ${providerStatus}` : ""}): ${providerMessage}`,
         );
-        if (attempt < 3 && isRetryableGeminiError(error)) {
+        if (
+          attempt < maxAttempts &&
+          isRetryableGeminiError(error)
+        ) {
           await delay(750 * 2 ** (attempt - 1));
           continue;
         }
@@ -104,7 +179,12 @@ async function callGeminiWithModel(
 
       return parseGeminiText((await response.json()) as GeminiResponse);
     } catch (error) {
-      if (attempt < 3 && isRetryableGeminiError(error)) {
+      if (options.signal?.aborted) {
+        throw new CaptionGenerationTimeoutError(
+          "Caption improvement exceeded its time limit.",
+        );
+      }
+      if (attempt < maxAttempts && isRetryableGeminiError(error)) {
         await delay(750 * 2 ** (attempt - 1));
         continue;
       }
@@ -115,7 +195,12 @@ async function callGeminiWithModel(
   return "";
 }
 
-async function generateCaption(imageBase64: string, mimeType: string) {
+async function generateCaption(
+  supabase: SupabaseClient,
+  userId: string,
+  imageBase64: string,
+  mimeType: string,
+) {
   const models = Array.from(
     new Set(
       [process.env.GEMINI_MODEL, "gemini-3.8-flash"].filter(
@@ -126,14 +211,79 @@ async function generateCaption(imageBase64: string, mimeType: string) {
   let lastError: unknown = null;
 
   for (const model of models) {
+    const chainId = randomUUID();
+    let draft: string;
     try {
-      const caption = await callGeminiWithModel(imageBase64, mimeType, model);
-      if (caption.trim()) return caption.trim();
-      lastError = new Error(`Gemini returned an empty response for ${model}.`);
+      draft = await callGeminiWithModel(
+        [
+          {
+            parts: [
+              { text: CAPTION_PROMPT },
+              {
+                inline_data: {
+                  mime_type: mimeType,
+                  data: imageBase64,
+                },
+              },
+            ],
+          },
+        ],
+        model,
+      );
     } catch (error) {
-      if (isGeminiQuotaError(error)) throw error;
+      if (isGeminiQuotaError(error) || error instanceof CaptionGenerationTimeoutError) {
+        throw error;
+      }
       lastError = error;
+      continue;
     }
+
+    await logPromptChainStep(supabase, {
+      chainId,
+      userId,
+      stage: "draft",
+      model,
+      prompt: CAPTION_PROMPT,
+      response: draft,
+      imageMimeType: mimeType,
+    });
+    if (!draft.trim()) {
+      lastError = new Error(`Gemini returned an empty draft for ${model}.`);
+      continue;
+    }
+
+    const draftCaption = draft.trim();
+    const improvePrompt = `${IMPROVE_CAPTION_PROMPT}\n\nDraft caption:\n${draftCaption}`;
+    try {
+      const improvedCaption = await callGeminiWithModel(
+        [{ parts: [{ text: improvePrompt }] }],
+        model,
+        {
+          signal: AbortSignal.timeout(CAPTION_IMPROVEMENT_TIMEOUT_MS),
+          maxAttempts: 1,
+        },
+      );
+      await logPromptChainStep(supabase, {
+        chainId,
+        userId,
+        stage: "improve",
+        model,
+        prompt: improvePrompt,
+        response: improvedCaption,
+        imageMimeType: mimeType,
+      });
+      if (improvedCaption.trim()) return improvedCaption.trim();
+      console.warn(
+        `Gemini returned an empty improved caption for ${model}; returning the draft.`,
+      );
+    } catch (error) {
+      console.warn(
+        `Caption improvement failed for ${model}; returning the draft.`,
+        error,
+      );
+    }
+
+    return draftCaption;
   }
 
   if (lastError) throw lastError;
@@ -186,7 +336,12 @@ export async function POST(request: Request) {
 
   try {
     const bytes = Buffer.from(await image.arrayBuffer());
-    const caption = await generateCaption(bytes.toString("base64"), image.type);
+    const caption = await generateCaption(
+      supabase,
+      user.id,
+      bytes.toString("base64"),
+      image.type,
+    );
     return NextResponse.json({ caption });
   } catch (error) {
     console.error("Caption generation failed:", error);
@@ -194,19 +349,29 @@ export async function POST(request: Request) {
       error instanceof Error &&
       error.message === "GEMINI_API_KEY is not configured."
         ? "Caption generation is not configured. Set GEMINI_API_KEY in the server environment."
-        : isGeminiQuotaError(error)
-          ? "Gemini API quota is exhausted for this model. Wait for the quota to reset or enable a plan with additional quota."
-          : isRetryableGeminiError(error)
-            ? "The caption service is temporarily busy. Please wait a moment and try again."
-            : "Caption generation failed. Please try again.";
+        : error instanceof CaptionGenerationTimeoutError
+          ? "Caption generation is taking too long. Please try again."
+          : isGeminiQuotaError(error)
+            ? "Gemini API quota is exhausted for this model. Wait for the quota to reset or enable a plan with additional quota."
+            : error instanceof GeminiApiError &&
+                (error.status === 400 || error.status === 404)
+              ? "Gemini rejected the request or configured model. Check GEMINI_MODEL and the server logs for the provider's error details."
+              : error instanceof GeminiApiError &&
+                  (error.status === 401 || error.status === 403)
+                ? "Gemini rejected the API credentials or access. Check the API key and model permissions."
+            : isRetryableGeminiError(error)
+              ? "The caption service is temporarily busy. Please wait a moment and try again."
+              : "Caption generation failed. Please try again.";
     return NextResponse.json(
       { error: message },
       {
         status: isGeminiQuotaError(error)
           ? 429
-          : isRetryableGeminiError(error)
-            ? 503
-            : 502,
+          : error instanceof CaptionGenerationTimeoutError
+            ? 504
+            : isRetryableGeminiError(error)
+              ? 503
+              : 502,
       },
     );
   }

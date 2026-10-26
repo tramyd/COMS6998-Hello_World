@@ -57,12 +57,25 @@ export function ProfileForm({ profile }: { profile: ProfileFormData }) {
     }
 
     setSaving(true);
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from("profiles")
       .update({ first_name: firstName.trim(), last_name: lastName.trim() })
       .eq("id", saved.id)
       .select("id, created_at, first_name, last_name, profile_picture_url")
       .maybeSingle();
+    if (!error && !data) {
+      ({ data, error } = await supabase
+        .from("profiles")
+        .insert({
+          id: saved.id,
+          email: saved.email,
+          first_name: firstName.trim(),
+          last_name: lastName.trim(),
+          profile_picture_url: saved.profile_picture_url,
+        })
+        .select("id, created_at, first_name, last_name, profile_picture_url")
+        .single());
+    }
     setSaving(false);
 
     if (error) {
@@ -71,14 +84,15 @@ export function ProfileForm({ profile }: { profile: ProfileFormData }) {
       return;
     }
     if (!data) {
-      setError("Profile row not found, so nothing was updated.");
+      setError("The profile could not be saved. Please refresh and try again.");
       return;
     }
 
     setSaved({
       ...saved,
-      first_name: firstName.trim(),
-      last_name: lastName.trim(),
+      first_name: data.first_name,
+      last_name: data.last_name,
+      profile_picture_url: data.profile_picture_url,
     });
     setEditing(false);
     setMessage("Name updated.");
@@ -126,12 +140,25 @@ export function ProfileForm({ profile }: { profile: ProfileFormData }) {
     // Cache-buster so the browser shows the new image after a replace
     const url = `${urlData.publicUrl}?v=${Date.now()}`;
 
-    const { data: updatedProfile, error: updateError } = await supabase
+    let { data: updatedProfile, error: updateError } = await supabase
       .from("profiles")
       .update({ profile_picture_url: url })
       .eq("id", saved.id)
       .select("id")
       .maybeSingle();
+    if (!updateError && !updatedProfile) {
+      ({ data: updatedProfile, error: updateError } = await supabase
+        .from("profiles")
+        .insert({
+          id: saved.id,
+          email: saved.email,
+          first_name: saved.first_name,
+          last_name: saved.last_name,
+          profile_picture_url: url,
+        })
+        .select("id")
+        .single());
+    }
 
     setUploading(false);
 
@@ -140,11 +167,6 @@ export function ProfileForm({ profile }: { profile: ProfileFormData }) {
       setError(updateError.message);
       return;
     }
-    if (!updatedProfile) {
-      setError("Profile row not found, so the picture URL was not updated.");
-      return;
-    }
-
     setSaved({ ...saved, profile_picture_url: url });
     setPhotoMessage("Profile picture updated.");
   };
