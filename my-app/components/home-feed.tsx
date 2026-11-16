@@ -49,18 +49,6 @@ function getOwnerName(post: PostWithProfile) {
   return name || "Anonymous user";
 }
 
-function imagePathFromPublicUrl(url: string) {
-  const marker = "/post-images/";
-  const markerIndex = url.indexOf(marker);
-  if (markerIndex === -1) return null;
-
-  try {
-    return decodeURIComponent(url.slice(markerIndex + marker.length));
-  } catch {
-    return null;
-  }
-}
-
 export function HomeFeed({
   initialPosts,
   initialVotes,
@@ -407,7 +395,7 @@ export function HomeFeed({
 
   const handleDeletePost = async (post: PostWithProfile) => {
     if (!initialUserId || post.post_owner !== initialUserId) return;
-    if (!window.confirm("Delete this post? This cannot be undone.")) return;
+    if (!window.confirm("Delete this post? It will no longer appear publicly.")) return;
 
     setBusyPostIds((current) => new Set(current).add(post.id));
     setVoteError(null);
@@ -429,26 +417,6 @@ export function HomeFeed({
       delete updated[post.id];
       return updated;
     });
-    const imagePath = imagePathFromPublicUrl(post.image_url);
-    if (imagePath) {
-      try {
-        const { error: storageError } = await removePostImage(
-          supabase,
-          imagePath,
-        );
-        if (storageError) {
-          console.error(
-            "Post was deleted, but its image cleanup failed:",
-            storageError,
-          );
-        }
-      } catch (storageError) {
-        console.error(
-          "Post was deleted, but its image cleanup failed:",
-          storageError,
-        );
-      }
-    }
     setBusyPostIds((current) => {
       const updated = new Set(current);
       updated.delete(post.id);
@@ -831,6 +799,31 @@ export function HomeFeed({
           </div>
         )}
       </div>
+      {isGenerating && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="caption-loading-title"
+            aria-describedby="caption-loading-message"
+            className="w-full max-w-sm rounded-2xl border border-border bg-card p-6 text-center shadow-xl"
+          >
+            <div
+              aria-hidden="true"
+              className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary"
+            />
+            <h2 id="caption-loading-title" className="text-lg font-semibold">
+              Generating your caption
+            </h2>
+            <p
+              id="caption-loading-message"
+              className="mt-2 text-sm text-muted-foreground"
+            >
+              Allow up to 5 minutes for the caption to generate.
+            </p>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

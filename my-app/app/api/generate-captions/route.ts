@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
 const MAX_GEMINI_ATTEMPTS = 2;
+const GEMINI_REQUEST_TIMEOUT_MS = 120_000;
 const CAPTION_IMPROVEMENT_TIMEOUT_MS = 120_000;
 const PROMPT_LOG_TIMEOUT_MS = 3_000;
 const ALLOWED_IMAGE_TYPES = new Set([
@@ -45,6 +46,8 @@ type GeminiResponse = {
   }>;
 };
 
+export const maxDuration = 300;
+
 function parseGeminiText(payload: GeminiResponse): string {
   return (
     payload.candidates
@@ -53,8 +56,7 @@ function parseGeminiText(payload: GeminiResponse): string {
           candidate.content?.parts?.map((part) => part.text ?? "").join("\n") ??
           "",
       )
-      .join("\n")
-      ?? ""
+      .join("\n") ?? ""
   );
 }
 
@@ -133,6 +135,8 @@ async function callGeminiWithModel(
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is not configured.");
 
+  const signal =
+    options.signal ?? AbortSignal.timeout(GEMINI_REQUEST_TIMEOUT_MS);
   const maxAttempts = options.maxAttempts ?? MAX_GEMINI_ATTEMPTS;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
@@ -145,7 +149,7 @@ async function callGeminiWithModel(
             contents,
             generationConfig: { temperature: 0.3 },
           }),
-          signal: options.signal,
+          signal,
         },
       );
 
@@ -167,10 +171,7 @@ async function callGeminiWithModel(
           providerStatus,
           `Gemini request failed (${response.status}${providerStatus ? ` ${providerStatus}` : ""}): ${providerMessage}`,
         );
-        if (
-          attempt < maxAttempts &&
-          isRetryableGeminiError(error)
-        ) {
+        if (attempt < maxAttempts && isRetryableGeminiError(error)) {
           await delay(750 * 2 ** (attempt - 1));
           continue;
         }
@@ -179,9 +180,9 @@ async function callGeminiWithModel(
 
       return parseGeminiText((await response.json()) as GeminiResponse);
     } catch (error) {
-      if (options.signal?.aborted) {
+      if (signal.aborted) {
         throw new CaptionGenerationTimeoutError(
-          "Caption improvement exceeded its time limit.",
+          "Gemini request exceeded its time limit.",
         );
       }
       if (attempt < maxAttempts && isRetryableGeminiError(error)) {
@@ -203,7 +204,7 @@ async function generateCaption(
 ) {
   const models = Array.from(
     new Set(
-      [process.env.GEMINI_MODEL, "gemini-3.8-flash"].filter(
+      [process.env.GEMINI_MODEL, "gemini-3.5-flash-lite"].filter(
         (model): model is string => Boolean(model),
       ),
     ),
@@ -231,7 +232,10 @@ async function generateCaption(
         model,
       );
     } catch (error) {
-      if (isGeminiQuotaError(error) || error instanceof CaptionGenerationTimeoutError) {
+      if (
+        isGeminiQuotaError(error) ||
+        error instanceof CaptionGenerationTimeoutError
+      ) {
         throw error;
       }
       lastError = error;
@@ -359,9 +363,9 @@ export async function POST(request: Request) {
               : error instanceof GeminiApiError &&
                   (error.status === 401 || error.status === 403)
                 ? "Gemini rejected the API credentials or access. Check the API key and model permissions."
-            : isRetryableGeminiError(error)
-              ? "The caption service is temporarily busy. Please wait a moment and try again."
-              : "Caption generation failed. Please try again.";
+                : isRetryableGeminiError(error)
+                  ? "The caption service is temporarily busy. Please wait a moment and try again."
+                  : "Caption generation failed. Please try again.";
     return NextResponse.json(
       { error: message },
       {
